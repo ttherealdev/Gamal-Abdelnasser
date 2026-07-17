@@ -10,12 +10,11 @@ function makePrismaClient(): PrismaClient {
       ? (["query", "error", "warn"] as const)
       : (["error"] as const);
 
-  if (process.env.DATABASE_URL) {
-    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-    return new PrismaClient({ adapter, log } as any);
-  }
-  // No DATABASE_URL — client will throw on any DB query (expected in dev without DB)
-  return new PrismaClient({ log } as any);
+  const adapter = new PrismaPg({
+    connectionString:
+      process.env.DATABASE_URL ?? "postgresql://placeholder:placeholder@localhost:5432/placeholder",
+  });
+  return new PrismaClient({ adapter, log } as any);
 }
 
 export const db = globalForPrisma.db ?? makePrismaClient();
