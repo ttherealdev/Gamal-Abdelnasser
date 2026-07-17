@@ -1,0 +1,503 @@
+// ============================================================================
+// Gamal Abdel Nasser Military Secondary School — Core Data Model
+// Prisma 7 / PostgreSQL — redesigned for 10k+ active users (students, staff, parents)
+// ============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum Role {
+  DEVELOPER
+  ADMIN
+  TEACHER
+  PARENT
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum Religion {
+  ISLAM
+  CHRISTIANITY
+}
+
+enum SecondLanguage {
+  FRENCH
+  GERMAN
+  SPANISH
+}
+
+enum StageLevel {
+  FIRST_SECONDARY
+  SECOND_SECONDARY
+}
+
+enum Track {
+  SCIENCE
+  ARTS
+  GENERAL
+}
+
+enum ExamType {
+  MIDTERM
+  FINAL
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  TRANSFERRED
+  WITHDRAWN
+  GRADUATED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+enum AuditEntity {
+  USER
+  STUDENT
+  CLASS_ROOM
+  SUBJECT
+  ENROLLMENT
+  TEACHER_ASSIGNMENT
+  WEEKLY_EVALUATION
+  MONTHLY_EXAM
+  EXAM_GRADE
+}
+
+// ----------------------------------------------------------------------------
+// Auth — owned by better-auth. Only extend via additionalFields that mirror
+// these columns 1:1 in server/better-auth/config.ts, never rename them.
+// ----------------------------------------------------------------------------
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  role     Role    @default(TEACHER)
+  gender   Gender?
+  phone    String?
+  banned      Boolean?  @default(false)
+  banReason   String?
+  banExpires  DateTime?
+
+  // NOTE: only meaningful for TEACHER — their subject specialty, used to
+  // filter the teacher picker when assigning them to a class ("only show
+  // Arabic teachers when assigning Arabic for this class"). This is
+  // independent of TeacherAssignment, which is the real class+subject+year
+  // assignment; a teacher's specialty doesn't change per class or year.
+  subjectId String?  @map("subject_id") @db.Uuid
+  subject   Subject? @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+
+  createdById  String?
+  createdBy    User?   @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdUsers User[]  @relation("UserCreatedBy")
+
+  sessions Session[]
+  accounts Account[]
+
+  createdStudents           Student[]          @relation("StudentCreatedBy")
+  teacherAssignments        TeacherAssignment[]
+  recordedWeeklyEvaluations WeeklyEvaluation[]  @relation("WeeklyEvaluationRecordedBy")
+  recordedMonthlyExams      MonthlyExam[]       @relation("MonthlyExamRecordedBy")
+  recordedExamGrades        ExamGrade[]         @relation("ExamGradeRecordedBy")
+  auditLogs                 AuditLog[]
+  studentProfile            Student?            @relation("StudentParentAccount")
+
+  @@index([role])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  impersonatedBy String?
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  idToken               String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+// ----------------------------------------------------------------------------
+// Academic structure
+// ----------------------------------------------------------------------------
+
+// NOTE: natural key ("2025-2026") — every grading/enrollment record is scoped
+// to a year so promoting students each September never touches historical rows.
+model AcademicYear {
+  id        String   @id
+  startsAt  DateTime @db.Date
+  endsAt    DateTime @db.Date
+  isCurrent Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  // NOTE: the whole grading UI is organized around "the current month", not
+  // semesters — a month = 4 weeks + one monthly exam (see WeeklyEvaluation
+  // and MonthlyExam below). activeMonth is a DEFAULT only: admin can still
+  // browse/correct any past month via the month picker; it's never a hard
+  // lock. Real write access is entirely controlled by WeekWindow.
+  activeMonth Int? @map("active_month")
+
+  classRooms          ClassRoom[]
+  enrollments         Enrollment[]
+  teacherAssignments  TeacherAssignment[]
+  weeklyEvaluations   WeeklyEvaluation[]
+  monthlyExams        MonthlyExam[]
+  examGrades          ExamGrade[]
+  weekWindows         WeekWindow[]
+
+  @@index([isCurrent])
+  @@map("academic_years")
+}
+
+// NOTE: school-wide, not per-class/subject — a week opens or closes for
+// everyone at once. Scoped to (academicYearId, month) with weekInMonth 1-4 —
+// there are only ever 4 slots to manage at a time, for whichever month is
+// currently active. Admin can open more than one slot simultaneously (e.g.
+// "week 1 had a problem, catch up with week 1+2 open together") — this is
+// not a strict single-week-only lock, it's whatever the admin decides.
+// TEACHER can only read/write weeks marked open here; ADMIN/DEVELOPER can
+// still see and edit every week regardless (needed for corrections), but
+// the grid marks closed weeks so admin edits are a deliberate override, not
+// an accident.
+model WeekWindow {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  academicYearId String       @map("academic_year_id")
+  month          Int
+  weekInMonth    Int          @map("week_in_month")
+  isOpen         Boolean      @default(false) @map("is_open")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+
+  @@unique([academicYearId, month, weekInMonth])
+  @@index([academicYearId, month, isOpen])
+  @@map("week_windows")
+}
+
+// NOTE: (code, academicYearId) is unique, not code alone — "1/1" is a different
+// roster every year, so last year's class and this year's class never collide.
+model ClassRoom {
+  id             String     @id @default(uuid(7)) @db.Uuid
+  code           String
+  stageLevel     StageLevel @map("stage_level")
+  track          Track      @default(GENERAL)
+  capacity       Int        @default(40)
+  academicYearId String     @map("academic_year_id")
+  createdAt      DateTime   @default(now()) @map("created_at")
+
+  academicYear       AcademicYear        @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  enrollments        Enrollment[]
+  teacherAssignments TeacherAssignment[]
+  weeklyEvaluations  WeeklyEvaluation[]
+  monthlyExams       MonthlyExam[]
+  examGrades         ExamGrade[]
+
+  @@unique([code, academicYearId])
+  @@index([academicYearId, stageLevel])
+  @@map("class_rooms")
+}
+
+// NOTE: subjects are data, not hardcoded strings — adding "البرمجة والذكاء
+// الاصطناعي" or retiring one is an admin-panel edit, not a code deploy.
+// track = GENERAL means the subject is common to both tracks within the
+// stage. It is intentionally never null: a nullable field inside a
+// composite @@unique can't be looked up via Prisma's whereUnique shortcut
+// ("Argument track must not be null") — GENERAL keeps the constraint fully
+// non-nullable while meaning exactly the same thing.
+model Subject {
+  id              String     @id @default(uuid(7)) @db.Uuid
+  name            String
+  stageLevel      StageLevel @map("stage_level")
+  track           Track      @default(GENERAL)
+  maxScore        Int        @default(100) @map("max_score")
+  minPassingScore Int        @default(50) @map("min_passing_score")
+  // The three components entered every week (see WeeklyEvaluation) plus the
+  // once-a-month exam (see MonthlyExam). Defaults match the standard used
+  // across subjects; each is still independently configurable per subject.
+  weeklyBehaviorMax Int      @default(10) @map("weekly_behavior_max")
+  weeklyNotebookMax Int      @default(15) @map("weekly_notebook_max")
+  weeklyTestMax     Int      @default(15) @map("weekly_test_max")
+  monthlyExamMax    Int      @default(15) @map("monthly_exam_max")
+  displayOrder    Int        @default(0) @map("display_order")
+  isActive        Boolean    @default(true) @map("is_active")
+
+  teacherAssignments TeacherAssignment[]
+  weeklyEvaluations  WeeklyEvaluation[]
+  monthlyExams       MonthlyExam[]
+  examGrades         ExamGrade[]
+  specialistTeachers User[]
+
+  @@unique([name, stageLevel, track])
+  @@index([stageLevel, track, isActive])
+  @@map("subjects")
+}
+
+// ----------------------------------------------------------------------------
+// People
+// ----------------------------------------------------------------------------
+
+model Student {
+  id                    String          @id @default(uuid(7)) @db.Uuid
+  studentCode           String          @unique @map("student_code")
+  firstName             String          @map("first_name")
+  fatherName            String          @map("father_name")
+  grandfatherName       String          @map("grandfather_name")
+  familyName            String          @map("family_name")
+  fullName              String          @map("full_name")
+  nationalId            String?         @unique @map("national_id")
+  gender                Gender
+  religion              Religion?
+  secondLanguage        SecondLanguage? @map("second_language")
+  birthDate             DateTime?       @db.Date @map("birth_date")
+  phone                 String?
+  isActive              Boolean         @default(true) @map("is_active")
+
+  parentUserId String? @unique @map("parent_user_id")
+  parentUser   User?   @relation("StudentParentAccount", fields: [parentUserId], references: [id], onDelete: SetNull)
+
+  createdById String? @map("created_by_id")
+  createdBy   User?   @relation("StudentCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  enrollments       Enrollment[]
+  weeklyEvaluations WeeklyEvaluation[]
+  monthlyExams      MonthlyExam[]
+  examGrades        ExamGrade[]
+  auditLogs         AuditLog[]
+
+  // NOTE: fullName is denormalized (firstName + ... + familyName) and kept in
+  // sync by the student service on every write — avoids concatenating on every
+  // search query across 10k+ rows, and lets us index it directly.
+  @@index([fullName])
+  @@index([isActive])
+  @@map("students")
+}
+
+// NOTE: one row per student per academic year, not per class change — a mid-
+// year transfer updates classRoomId on the same row (and is captured by
+// AuditLog), so a student can never end up enrolled twice in one year.
+model Enrollment {
+  id             String           @id @default(uuid(7)) @db.Uuid
+  studentId      String           @map("student_id") @db.Uuid
+  classRoomId    String           @map("class_room_id") @db.Uuid
+  academicYearId String           @map("academic_year_id")
+  status         EnrollmentStatus @default(ACTIVE)
+  enrolledAt     DateTime         @default(now()) @map("enrolled_at")
+
+  student      Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classRoom    ClassRoom    @relation(fields: [classRoomId], references: [id], onDelete: Restrict)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+
+  @@unique([studentId, academicYearId])
+  @@index([classRoomId, status])
+  @@map("enrollments")
+}
+
+// NOTE: replaces the old `classes String[]` + single `subject` on User — a
+// teacher can now teach different subjects in different classes, per year.
+model TeacherAssignment {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  userId         String   @map("user_id")
+  classRoomId    String   @map("class_room_id") @db.Uuid
+  subjectId      String   @map("subject_id") @db.Uuid
+  academicYearId String   @map("academic_year_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  classRoom    ClassRoom    @relation(fields: [classRoomId], references: [id], onDelete: Cascade)
+  subject      Subject      @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, classRoomId, subjectId, academicYearId])
+  @@index([classRoomId, subjectId])
+  @@index([userId, academicYearId])
+  @@map("teacher_assignments")
+}
+
+// ----------------------------------------------------------------------------
+// Grading
+// ----------------------------------------------------------------------------
+
+// NOTE: one row per student/subject/month/week captures all three graded
+// components together (behavior, notebook, weekly test) since they're
+// always entered and reviewed as a set for that week — not three separate
+// rows. max* columns are snapshotted from the subject's config at write
+// time (like the rest of this schema), so a later config change never
+// silently rewrites historical grades.
+model WeeklyEvaluation {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  studentId      String   @map("student_id") @db.Uuid
+  subjectId      String   @map("subject_id") @db.Uuid
+  classRoomId    String   @map("class_room_id") @db.Uuid
+  academicYearId String   @map("academic_year_id")
+  month          Int
+  weekInMonth    Int      @map("week_in_month")
+  behaviorScore  Int      @map("behavior_score")
+  behaviorMax    Int      @map("behavior_max")
+  notebookScore  Int      @map("notebook_score")
+  notebookMax    Int      @map("notebook_max")
+  testScore      Int      @map("test_score")
+  testMax        Int      @map("test_max")
+  recordedById   String?  @map("recorded_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  student      Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject      Subject      @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  classRoom    ClassRoom    @relation(fields: [classRoomId], references: [id], onDelete: Restrict)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  recordedBy   User?        @relation("WeeklyEvaluationRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@unique([studentId, subjectId, academicYearId, month, weekInMonth])
+  @@index([classRoomId, subjectId, month, weekInMonth])
+  @@index([studentId, academicYearId])
+  @@map("weekly_evaluations")
+}
+
+// NOTE: the once-a-month exam, separate from the four weekly rows above.
+// Named from `month` at render time (see lib/months.ts), never stored as
+// text, so it can never drift from the actual month number.
+model MonthlyExam {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  studentId      String   @map("student_id") @db.Uuid
+  subjectId      String   @map("subject_id") @db.Uuid
+  classRoomId    String   @map("class_room_id") @db.Uuid
+  academicYearId String   @map("academic_year_id")
+  month          Int
+  score          Int
+  maxScore       Int      @map("max_score")
+  recordedById   String?  @map("recorded_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  student      Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject      Subject      @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  classRoom    ClassRoom    @relation(fields: [classRoomId], references: [id], onDelete: Restrict)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  recordedBy   User?        @relation("MonthlyExamRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@unique([studentId, subjectId, academicYearId, month])
+  @@index([classRoomId, subjectId, month])
+  @@map("monthly_exams")
+}
+
+// NOTE: unifies the old ExamGrade + MidyearGrade duplicate tables — same
+// shape, discriminated by examType. gradeLetter is intentionally NOT stored;
+// it is a pure function of (totalScore, subject.maxScore) computed in the
+// service layer, so it can never drift out of sync.
+model ExamGrade {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  studentId      String   @map("student_id") @db.Uuid
+  subjectId      String   @map("subject_id") @db.Uuid
+  classRoomId    String   @map("class_room_id") @db.Uuid
+  academicYearId String   @map("academic_year_id")
+  examType       ExamType @map("exam_type")
+  practicalScore Int      @default(0) @map("practical_score")
+  writtenScore   Int      @default(0) @map("written_score")
+  totalScore     Int      @default(0) @map("total_score")
+  notes          String?
+  recordedById   String?  @map("recorded_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  student      Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject      Subject      @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  classRoom    ClassRoom    @relation(fields: [classRoomId], references: [id], onDelete: Restrict)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  recordedBy   User?        @relation("ExamGradeRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@unique([studentId, subjectId, academicYearId, examType])
+  @@index([classRoomId, academicYearId, examType])
+  @@map("exam_grades")
+}
+
+// ----------------------------------------------------------------------------
+// Audit
+// ----------------------------------------------------------------------------
+
+// NOTE: denormalized on purpose (userName, studentName snapshots) — an audit
+// row must never change meaning if the referenced user/student is later
+// renamed or deactivated.
+model AuditLog {
+  id           String      @id @default(uuid(7)) @db.Uuid
+  action       AuditAction
+  entityType   AuditEntity @map("entity_type")
+  entityId     String      @map("entity_id")
+  userId       String?     @map("user_id")
+  userName     String      @map("user_name")
+  userRole     Role        @map("user_role")
+  studentId    String?     @map("student_id") @db.Uuid
+  studentName  String?     @map("student_name")
+  classRoomCode String?    @map("class_room_code")
+  fieldChanged String?     @map("field_changed")
+  oldValue     String?     @map("old_value")
+  newValue     String?     @map("new_value")
+  note         String?
+  timestamp    DateTime    @default(now())
+
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  student Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
+
+  @@index([timestamp(sort: Desc)])
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([studentId])
+  @@map("audit_logs")
+}
