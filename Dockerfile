@@ -12,7 +12,6 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ARG NEXT_PUBLIC_APP_URL
 ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
 ENV SKIP_ENV_VALIDATION=1
-
 RUN bunx prisma generate
 RUN bun run build
 
@@ -24,7 +23,7 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
-CMD ["bunx", "prisma", "migrate", "deploy"]
+CMD ["sh", "-c", "bunx prisma migrate deploy && bun run scripts/db-seed.ts"]
 
 FROM base AS runner
 ENV NODE_ENV=production
@@ -34,11 +33,9 @@ ENV HOSTNAME=0.0.0.0
 
 RUN groupadd --system --gid 1001 nodejs && \
     useradd --system --uid 1001 --gid nodejs nextjs
-    
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 USER nextjs
-
 EXPOSE 3000
 CMD ["bun", "server.js"]
