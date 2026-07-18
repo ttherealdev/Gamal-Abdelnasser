@@ -1,4 +1,4 @@
-# 🏫 Gamal Abdel Nasser Boys School (Franco) — Management System
+# 🏫 Gamal Abdel Nasser Boys School — Management System
 
 <p>
   <img src="https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=next.js&logoColor=white" alt="Next.js 16" />
