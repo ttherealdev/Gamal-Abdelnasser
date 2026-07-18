@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM oven/bun:1-slim AS base
 WORKDIR /app
 FROM base AS deps
@@ -8,6 +9,9 @@ FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
+
+ARG NEXT_PUBLIC_APP_URL
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
 
 ENV SKIP_ENV_VALIDATION=1
 RUN bunx prisma generate
@@ -27,8 +31,7 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
-# oven/bun:1-slim is Debian-based, not Alpine — addgroup/adduser (BusyBox)
-# don't exist here. Use Debian's own user-management tools instead.
+
 RUN groupadd --system --gid 1001 nodejs && \
     useradd --system --uid 1001 --gid nodejs nextjs
 COPY --from=builder /app/public ./public

@@ -18,6 +18,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runner
+      args:
+        NEXT_PUBLIC_APP_URL: ${BETTER_AUTH_URL}
     restart: unless-stopped
     expose:
       - '3000'
